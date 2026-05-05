@@ -1,0 +1,20 @@
+# Claude Code local settings
+.claude/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+env/
+*_env/
+
+# Test output
+/tmp/
+*.asc
+
+# IDE
+.idea/
+.vscode/

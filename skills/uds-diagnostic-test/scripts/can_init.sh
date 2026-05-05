@@ -1,15 +1,17 @@
 #!/bin/bash
-# CAN 接口初始化脚本 (WSL2 + PCAN-USB Pro FD)
-# 唯一入口 — 所有CAN初始化统一经过此处
+# CAN 接口初始化脚本 — 支持 Linux SocketCAN (原生/WSL2)
+# 唯一入口，所有 CAN 初始化统一经过此处
 # 用法:
 #   Classic CAN:  bash can_init.sh
 #                  bash can_init.sh --bitrate 500000 --sp 0.800
 #   CAN FD:       bash can_init.sh --fd
 #                  bash can_init.sh --fd --bitrate 500000 --dbitrate 2000000 --sp 0.800 --dsp 0.800
 #   强制释放占用: bash can_init.sh --force
+#   自动检测设备: bash can_init.sh --detect
 # 默认值:
 #   Classic CAN: bitrate=500000, sp=0.800
 #   CAN FD:      bitrate=500000(仲裁段), dbitrate=2000000(数据段), sp=0.800(仲裁段采样点), dsp=0.800(数据段采样点)
+# 支持驱动: peak_usb, gs_usb, mttcan, kvaser_usb, ems_usb, esd_usb2, vcan
 
 CHANNEL="can0"
 FD_MODE=false
@@ -43,6 +45,8 @@ while [[ $# -gt 0 ]]; do
             echo "  bash can_init.sh --channel can1               # 指定通道"
             echo "  bash can_init.sh --force                       # 强制释放占用后初始化"
             echo ""
+            echo "支持驱动: peak_usb | gs_usb | mttcan | kvaser_usb | ems_usb | esd_usb2"
+            echo ""
             echo "默认值:"
             echo "  Classic CAN: bitrate=500000, sp=0.800"
             echo "  CAN FD:      bitrate=500000(仲裁段), dbitrate=2000000(数据段)"
@@ -68,18 +72,39 @@ else
     echo "[INFO] 模式: Classic CAN (bitrate=${BITRATE}, sp=${SAMPLE_POINT})"
 fi
 
-# 1. 加载内核模块 (WSL2 必须)
-for mod in can can_raw peak_usb; do
+# 1. 加载内核模块 (SocketCAN 协议栈 + 硬件驱动自动检测)
+CAN_DRIVERS=("peak_usb" "gs_usb" "mttcan" "kvaser_usb" "ems_usb" "esd_usb2")
+LOADED_COUNT=0
+
+for mod in can can_raw; do
     if ! lsmod | grep -q "^${mod} "; then
-        echo "[INFO] 加载 ${mod} 模块..."
-        sudo modprobe ${mod} 2>/dev/null || { echo "[ERROR] 无法加载 ${mod} 模块"; exit 1; }
+        sudo modprobe ${mod} 2>/dev/null && ((LOADED_COUNT++)) || true
     fi
 done
-echo "[OK] 内核模块已加载 (can, can_raw, peak_usb)"
+
+# 自动检测已连接的 CAN 硬件驱动
+for drv in "${CAN_DRIVERS[@]}"; do
+    if lsmod | grep -q "^${drv} "; then
+        echo "[INFO] 驱动 ${drv} 已加载"
+        ((LOADED_COUNT++))
+        break
+    fi
+    if sudo modprobe ${drv} 2>/dev/null; then
+        echo "[INFO] 已加载驱动: ${drv}"
+        ((LOADED_COUNT++))
+        break
+    fi
+done
+
+if [ $LOADED_COUNT -eq 0 ]; then
+    echo "[WARN] 未检测到 CAN 硬件驱动，请确认设备已连接且驱动已安装"
+    echo "      常见驱动包: apt install can-utils (Debian/Ubuntu)"
+fi
+echo "[OK] 内核模块已就绪"
 
 # 2. 检查接口是否存在
 if ! ip link show ${CHANNEL} &>/dev/null; then
-    echo "[ERROR] ${CHANNEL} 接口不存在，请检查 USB 连接"
+    echo "[ERROR] ${CHANNEL} 接口不存在，请检查 CAN 设备连接及驱动"
     exit 1
 fi
 

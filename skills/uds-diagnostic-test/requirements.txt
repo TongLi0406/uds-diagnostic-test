@@ -1,0 +1,5 @@
+# UDS 诊断测试技能 — Python 依赖
+# 安装: pip install -r requirements.txt
+
+python-can>=4.0.0
+openpyxl>=3.0.0
