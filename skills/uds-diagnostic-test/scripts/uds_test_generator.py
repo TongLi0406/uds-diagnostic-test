@@ -909,99 +909,73 @@ class TestRunner:
         except Exception as e:
             print(f"[ERROR] CAN连接失败 ({{self.can_if}}): {{e}}")
             if self.can_if == "socketcan":
-                print(f"[HINT] 自动配置失败，可尝试手动执行:")
-                print(f"  sudo ip link set {{self.channel}} type can bitrate {{self.bitrate}}")
-                print(f"  sudo ip link set {{self.channel}} up")
+                print(f"[HINT] CAN初始化失败，手动恢复步骤:")
                 if CAN_FD_ENABLED:
-                    print(f"  # CAN FD: sudo ip link set {{self.channel}} type can bitrate {{self.bitrate}} dbitrate {{CAN_FD_DATA_BITRATE}} fd on")
-                print("[HINT] 或配置sudo免密 (一次配置永久生效):")
-                import getpass as _gp
-                _user = _gp.getuser()
-                _sudoers_line = _user + " ALL=(root) NOPASSWD: /sbin/ip link set can* type can *, /sbin/ip link set can* up, /sbin/ip link set can* down"
-                print("  sudo bash -c " + repr("echo " + repr(_sudoers_line) + " > /etc/sudoers.d/can-setup"))
-                print("  sudo chmod 440 /etc/sudoers.d/can-setup")
+                    print(f"  sudo ip link set {{self.channel}} down")
+                    print(f"  sudo ip link set {{self.channel}} type can bitrate {{self.bitrate}} dbitrate {{CAN_FD_DATA_BITRATE}} fd on sample-point {{self.sample_point:.3f}}")
+                else:
+                    print(f"  sudo ip link set {{self.channel}} down")
+                    print(f"  sudo ip link set {{self.channel}} type can bitrate {{self.bitrate}} sample-point {{self.sample_point:.3f}}")
+                print(f"  sudo ip link set {{self.channel}} up")
             return False
 
     def _setup_socketcan(self):
-        """自动配置SocketCAN接口 (bitrate/sample-point从参数获取)"""
+        """统一CAN初始化: 加载模块 → 释放占用 → 强制down → 配置 → up (唯一入口)"""
         import subprocess as _sp
         ch = self.channel
 
-        # 检查接口是否存在
+        # 1. 确保内核模块已加载 (WSL2 编译为模块，必须手动加载)
+        for mod in ["can", "can_raw"]:
+            _sp.run(["sudo", "modprobe", mod], capture_output=True, text=True)
+
+        # 2. 检查接口是否存在
         ret = _sp.run(["ip", "link", "show", ch], capture_output=True, text=True)
         if ret.returncode != 0:
             print(f"[WARN] SocketCAN接口 {{ch}} 不存在, 请检查CAN USB适配器是否已连接")
             return
 
-        # 读取当前配置的波特率和采样点
-        current_bitrate = 0
-        current_sp = 0.0
-        is_up = "UP" in (ret.stdout.split("\\n")[0] if ret.stdout else "")
-        det = _sp.run(["ip", "-details", "link", "show", ch], capture_output=True, text=True)
-        if det.returncode == 0:
-            for line in det.stdout.split("\\n"):
-                line = line.strip()
-                if "bitrate" in line:
-                    parts = line.split()
-                    for i, p in enumerate(parts):
-                        if p == "bitrate" and i + 1 < len(parts):
-                            try:
-                                current_bitrate = int(parts[i + 1])
-                            except ValueError:
-                                pass
-                        if p == "sample-point" and i + 1 < len(parts):
-                            try:
-                                current_sp = float(parts[i + 1])
-                            except ValueError:
-                                pass
+        # 3. 强制 down (释放可能占用的socket, 确保可重新配置)
+        #    先尝试正常 down; 如果失败则用 fuser 清理占用进程后重试
+        r = _sp.run(["sudo", "ip", "link", "set", ch, "down"], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"[INFO] {{ch}} down失败 (可能被占用), 尝试释放...")
+            # 查找并终止占用 CAN 接口的进程
+            _sp.run(["sudo", "fuser", "-k", f"/sys/class/net/{{ch}}/"], capture_output=True)
+            _sp.run(["sudo", "ip", "link", "set", ch, "down"], capture_output=True)
 
+        # 4. 配置接口参数 (Classic CAN / CAN FD 统一路径)
         target_sp = self.sample_point
-        need_reconfig = (current_bitrate != self.bitrate)
-        if target_sp > 0 and current_sp > 0 and abs(current_sp - target_sp) > 0.005:
-            need_reconfig = True
-
-        if is_up and not need_reconfig:
-            print(f"[OK] SocketCAN {{ch}} 已启用 (bitrate={{current_bitrate}}, sample-point={{current_sp}})")
-            return
-
-        # 总是先 down 再重新配置
-        if is_up:
-            print(f"[INFO] {{ch}} 参数不匹配, 重新配置 (bitrate: {{current_bitrate}}→{{self.bitrate}}, sp: {{current_sp}}→{{target_sp}})...")
-        _sp.run(["sudo", "ip", "link", "set", ch, "down"], capture_output=True)
-
+        cmd_type = [
+            "sudo", "ip", "link", "set", ch, "type", "can",
+            "bitrate", str(self.bitrate),
+        ]
         if CAN_FD_ENABLED:
-            cmd_type = ["sudo", "ip", "link", "set", ch, "type", "can",
-                        "bitrate", str(self.bitrate),
-                        "dbitrate", str(CAN_FD_DATA_BITRATE), "fd", "on"]
-        else:
-            cmd_type = ["sudo", "ip", "link", "set", ch, "type", "can",
-                        "bitrate", str(self.bitrate)]
-        # 添加仲裁段采样点
+            cmd_type.extend(["dbitrate", str(CAN_FD_DATA_BITRATE), "fd", "on"])
         if target_sp > 0:
             cmd_type.extend(["sample-point", f"{{target_sp:.3f}}"])
-        # CAN FD: 添加数据段采样点
         if CAN_FD_ENABLED and CAN_FD_DSAMPLE_POINT > 0:
             cmd_type.extend(["dsample-point", f"{{CAN_FD_DSAMPLE_POINT:.3f}}"])
+
         print(f"[INFO] 配置: {{' '.join(cmd_type)}}")
         ret = _sp.run(cmd_type, capture_output=True, text=True)
         if ret.returncode != 0:
-            print(f"[WARN] 配置失败: {{ret.stderr.strip()}}")
-            print("[HINT] 配置sudo免密 (仅限CAN接口, 一次配置永久生效):")
-            import getpass as _gp
-            _user = _gp.getuser()
-            _sudoers_line = _user + " ALL=(root) NOPASSWD: /sbin/ip link set can* type can *, /sbin/ip link set can* up, /sbin/ip link set can* down"
-            print("  sudo bash -c " + repr("echo " + repr(_sudoers_line) + " > /etc/sudoers.d/can-setup"))
-            print("  sudo chmod 440 /etc/sudoers.d/can-setup")
+            print(f"[ERROR] 配置失败: {{ret.stderr.strip()}}")
             return
 
+        # 5. 启用接口
         cmd_up = ["sudo", "ip", "link", "set", ch, "up"]
         print(f"[INFO] 启用: {{' '.join(cmd_up)}}")
         ret = _sp.run(cmd_up, capture_output=True, text=True)
         if ret.returncode != 0:
-            print(f"[WARN] 启用失败: {{ret.stderr.strip()}}")
-        else:
-            sp_info = f", sample-point={{target_sp:.3f}}" if target_sp > 0 else ""
-            print(f"[OK] SocketCAN {{ch}} 已自动配置并启用 (bitrate={{self.bitrate}}{{sp_info}})")
+            print(f"[ERROR] 启用失败: {{ret.stderr.strip()}}")
+            return
+
+        mode = "CAN FD" if CAN_FD_ENABLED else "Classic CAN"
+        bitrate_info = f"bitrate={{self.bitrate}}"
+        if CAN_FD_ENABLED:
+            bitrate_info += f", dbitrate={{CAN_FD_DATA_BITRATE}}"
+        sp_info = f", sp={{target_sp:.3f}}" if target_sp > 0 else ""
+        print(f"[OK] SocketCAN {{ch}} 已配置并启用 ({{mode}}, {{bitrate_info}}{{sp_info}})")
 
     def disconnect(self):
         """断开CAN"""
@@ -5643,7 +5617,7 @@ def generate_test_script(parsed_data, output_path, **kwargs):
     if fd_data_bitrate is None:
         fd_data_bitrate = can_config.get("fd_data_bitrate", 2000000)
     if fd_dsample_point is None:
-        fd_dsample_point = can_config.get("fd_dsample_point", 0.0)
+        fd_dsample_point = can_config.get("fd_dsample_point", 0.8)
     if can_fd:
         print(f"[INFO] CAN FD配置: dbitrate={fd_data_bitrate}, dsample_point={fd_dsample_point}")
     seedkey_dll_path = kwargs.get("seedkey_dll_path", "")

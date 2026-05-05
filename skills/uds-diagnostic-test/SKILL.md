@@ -102,19 +102,36 @@ $PYTHON $SKILL_DIR/scripts/uds_test_generator.py \
 
 ### 阶段 3：初始化 CAN 并执行测试
 
+**CAN 初始化入口（唯一）：`can_init.sh`**
+
+生成的测试脚本在 `connect()` 时也会调用内置的 `_setup_socketcan()`（逻辑与 `can_init.sh` 完全一致：加载内核模块 → 强制 down → 配置 → up）。
+
+**`can_init.sh` 使用说明（复制即用）：**
+
+| 场景 | 命令 |
+|------|------|
+| Classic CAN（默认 500k/80%） | `bash $SKILL_DIR/scripts/can_init.sh` |
+| Classic CAN（自定义） | `bash $SKILL_DIR/scripts/can_init.sh --bitrate 250000 --sp 0.750` |
+| CAN FD（默认：仲裁500k/数据2M/双80%） | `bash $SKILL_DIR/scripts/can_init.sh --fd` |
+| CAN FD（自定义） | `bash $SKILL_DIR/scripts/can_init.sh --fd --bitrate 500000 --dbitrate 2000000 --sp 0.800 --dsp 0.800` |
+| 接口被占用，强制释放 | `bash $SKILL_DIR/scripts/can_init.sh --force` |
+| 查看帮助 | `bash $SKILL_DIR/scripts/can_init.sh --help` |
+
+**CAN FD 默认参数：**
+- 仲裁段波特率: `500000` (500kbps)
+- 数据段波特率: `2000000` (2Mbps)
+- 仲裁段采样点: `0.800` (80%)
+- 数据段采样点: `0.800` (80%)
+
 **Step 3.1 初始化 CAN 接口：**
 
-Classic CAN（默认）：
 ```bash
+# Classic CAN
 bash $SKILL_DIR/scripts/can_init.sh
-```
 
-CAN FD（当调查表 `can_config.can_fd=true` 时）：
-```bash
-bash $SKILL_DIR/scripts/can_init.sh --fd --bitrate 2000000 --dbitrate 2000000 --sp 0.800
+# CAN FD（调查表 can_config.can_fd=true 时）
+bash $SKILL_DIR/scripts/can_init.sh --fd
 ```
-
-此脚本自动完成：加载内核模块 (can, can_raw, peak_usb) → down → 配置 → up。**不要在此之后重复执行 `ip link set` 命令。**
 
 **Step 3.2 快速验证 CAN 连通性（推荐）：**
 
@@ -176,14 +193,21 @@ $PYTHON /tmp/uds_test.py \
 
 ## CAN 环境故障排查
 
-如果 `can_init.sh` 失败：
+所有 CAN 初始化统一经 `can_init.sh` (bash) 或测试脚本内置的 `_setup_socketcan()` (Python) — 两者逻辑一致。
 
-1. USB 连接：`lsusb | grep -i peak`
-2. 内核模块：`lsmod | grep -E "peak_usb|can_raw|can "`
-3. 接口状态：`ip link show can0`
-4. 手动恢复（仅在 can_init.sh 完全失败时）：
+如果初始化失败：
+
+1. 检查 USB：`lsusb | grep -i peak`
+2. 检查内核模块：`lsmod | grep -E "peak_usb|can_raw"`
+3. 检查接口：`ip link show can0`
+4. 如果接口被占用无法 down：
    ```bash
-   sudo modprobe can_raw peak_usb
+   bash $SKILL_DIR/scripts/can_init.sh --force
+   ```
+5. 手动恢复（仅在以上全部失败时）：
+   ```bash
+   sudo modprobe can can_raw peak_usb
+   sudo fuser -k /sys/class/net/can0/
    sudo ip link set can0 down
    sudo ip link set can0 type can bitrate 500000 sample-point 0.800
    sudo ip link set can0 up

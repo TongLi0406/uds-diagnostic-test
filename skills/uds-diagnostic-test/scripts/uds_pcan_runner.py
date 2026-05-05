@@ -46,66 +46,6 @@ def _append_cli_arg(cmd, key, val):
     cmd.extend([flag, str(val)])
 
 
-def _setup_socketcan_interface(channel, bitrate, sample_point=0.8, fd=False, dbitrate=2000000, dsample_point=0.0):
-    """自动配置SocketCAN接口 (bitrate/sample-point/dbitrate/dsample-point从参数获取)"""
-    import subprocess as _sp
-
-    # 检查接口是否存在
-    ret = _sp.run(["ip", "link", "show", channel], capture_output=True, text=True)
-    if ret.returncode != 0:
-        return  # 接口不存在
-
-    is_up = "UP" in (ret.stdout.split("\n")[0] if ret.stdout else "")
-
-    # 读取当前波特率和采样点
-    current_bitrate = 0
-    current_sp = 0.0
-    det = _sp.run(["ip", "-details", "link", "show", channel], capture_output=True, text=True)
-    if det.returncode == 0:
-        for line in det.stdout.split("\n"):
-            if "bitrate" in line:
-                parts = line.split()
-                for i, p in enumerate(parts):
-                    if p == "bitrate" and i + 1 < len(parts):
-                        try:
-                            current_bitrate = int(parts[i + 1])
-                        except ValueError:
-                            pass
-                    if p == "sample-point" and i + 1 < len(parts):
-                        try:
-                            current_sp = float(parts[i + 1])
-                        except ValueError:
-                            pass
-
-    need_reconfig = (current_bitrate != bitrate)
-    if sample_point > 0 and current_sp > 0 and abs(current_sp - sample_point) > 0.005:
-        need_reconfig = True
-
-    if is_up and not need_reconfig:
-        sp_info = f", sample-point={current_sp}" if current_sp > 0 else ""
-        print(f"[OK] SocketCAN {channel} 已启用且配置匹配 (bitrate={current_bitrate}{sp_info}), 直接使用")
-        return  # 已正确配置，无需sudo
-
-    # 总是先 down 再重新配置
-    _sp.run(["sudo", "ip", "link", "set", channel, "down"], capture_output=True)
-
-    if fd:
-        cmd = ["sudo", "ip", "link", "set", channel, "type", "can",
-               "bitrate", str(bitrate), "dbitrate", str(dbitrate), "fd", "on"]
-    else:
-        cmd = ["sudo", "ip", "link", "set", channel, "type", "can", "bitrate", str(bitrate)]
-    if sample_point > 0:
-        cmd.extend(["sample-point", f"{sample_point:.3f}"])
-    if fd and dsample_point > 0:
-        cmd.extend(["dsample-point", f"{dsample_point:.3f}"])
-    print(f"[INFO] 自动配置SocketCAN: {' '.join(cmd)}")
-    _sp.run(cmd, capture_output=True)
-
-    _sp.run(["sudo", "ip", "link", "set", channel, "up"], capture_output=True)
-    sp_info = f", sample-point={sample_point:.3f}" if sample_point > 0 else ""
-    print(f"[OK] SocketCAN {channel} 已自动配置 (bitrate={bitrate}{sp_info})")
-
-
 def run_parser(input_file, output_json):
     """运行诊断调查表解析器"""
     parser_script = SCRIPT_DIR / "uds_survey_parser.py"
