@@ -911,9 +911,8 @@ class TestRunner:
             bus_kwargs = dict(
                 interface="socketcan",
                 channel=self.channel,
+                fd=True,
             )
-            if CAN_FD_ENABLED:
-                bus_kwargs["fd"] = True
             self.bus = can.interface.Bus(**bus_kwargs)
             # 启动CAN通信日志记录 (包装send/recv，同时记录TX和RX帧)
             if self.can_log_path:
