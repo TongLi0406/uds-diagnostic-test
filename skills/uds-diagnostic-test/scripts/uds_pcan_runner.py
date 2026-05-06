@@ -6,7 +6,7 @@ UDS PCAN测试执行器
 也可作为独立编排工具：解析 → 生成 → 执行 一站式完成
 """
 
-__version__ = "1.6.1"
+__version__ = "1.7.0"
 
 import argparse
 import importlib.util
@@ -19,6 +19,55 @@ from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).parent
+ENV_FILE = Path(os.environ.get("UDS_ENV_FILE", str(Path.home() / ".uds_env")))
+
+
+def _load_env_file():
+    """读取 ~/.uds_env，允许调用端不显式 source 也能复用固定环境。"""
+    if not ENV_FILE.is_file():
+        return {}
+
+    env_map = {}
+    for raw_line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env_map[key.strip()] = value.strip().strip('"').strip("'")
+    return env_map
+
+
+def _bootstrap_runtime_env():
+    """优先从 UDS 环境文件恢复运行时变量，减少对 shell 前缀的依赖。"""
+    env_map = _load_env_file()
+    for key in ("UDS_PYTHON", "UDS_SKILL_DIR", "UDS_WORK"):
+        if env_map.get(key) and not os.environ.get(key):
+            os.environ[key] = env_map[key]
+
+    os.environ.setdefault("UDS_SKILL_DIR", str(SCRIPT_DIR.parent))
+    os.environ.setdefault("UDS_WORK", str(Path.home() / ".uds_workspace"))
+
+
+def _runtime_python():
+    """统一选择后续子脚本使用的解释器。"""
+    configured = os.environ.get("UDS_PYTHON", "").strip()
+    if configured and Path(configured).is_file():
+        return configured
+
+    if ENV_FILE.is_file():
+        raise SystemExit(
+            f"[ERROR] UDS_PYTHON missing or invalid in {ENV_FILE}: {configured or '<empty>'}\n"
+            "[ERROR] Enter the uds-diagnostic-test skill root, then run: bash ./scripts/setup_env.sh"
+        )
+
+    raise SystemExit(
+        f"[ERROR] Runtime environment is not initialized: {ENV_FILE} not found\n"
+        "[ERROR] Enter the uds-diagnostic-test skill root, then run: bash ./scripts/setup_env.sh"
+    )
+
+
+_bootstrap_runtime_env()
+RUNTIME_PYTHON = _runtime_python()
 
 
 def _resolve_can_config(can_if, channel):
@@ -50,7 +99,7 @@ def run_parser(input_file, output_json):
     """运行诊断调查表解析器"""
     parser_script = SCRIPT_DIR / "uds_survey_parser.py"
     cmd = [
-        sys.executable, str(parser_script),
+        RUNTIME_PYTHON, str(parser_script),
         "--input", input_file,
         "--output", output_json,
     ]
@@ -66,7 +115,7 @@ def run_generator(input_json, output_script, **kwargs):
     """运行测试脚本生成器"""
     generator_script = SCRIPT_DIR / "uds_test_generator.py"
     cmd = [
-        sys.executable, str(generator_script),
+        RUNTIME_PYTHON, str(generator_script),
         "--input", input_json,
         "--output", output_script,
     ]
@@ -84,7 +133,7 @@ def run_generator(input_json, output_script, **kwargs):
 def run_test_script(test_script, report_path, **kwargs):
     """执行生成的测试脚本"""
     cmd = [
-        sys.executable, test_script,
+        RUNTIME_PYTHON, test_script,
         "--report", report_path,
     ]
     for key, val in kwargs.items():

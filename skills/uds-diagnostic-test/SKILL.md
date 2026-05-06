@@ -1,228 +1,172 @@
 ---
 name: uds-diagnostic-test
-version: "2.2.0"
+version: "2.8.0"
 description: "UDS 诊断测试技能。Use when: 收到诊断调查表、UDS diagnostic survey table、生成 UDS 测试脚本、基于诊断资料生成测试、执行 UDS 诊断测试、CAN 测试、DID 测试、DTC 测试、IOControl 测试、RoutineControl 测试、诊断服务测试、diagnostic test script generation and execution via SocketCAN"
 argument-hint: "提供诊断调查表文件路径，或描述需要测试的诊断服务"
 ---
 
 # UDS 诊断测试技能
 
-## 环境准备（首次使用执行一次）
+## 目标
+
+这个 skill 只解决三件事：
+
+1. 用固定 Python 环境解析调查表
+2. 生成并验证 UDS 测试脚本
+3. 在 SocketCAN 环境下执行测试
+
+详细驱动安装、WSL2 USB 透传、SecurityAccess 替代方案、NRC 说明、调查表默认值参考，统一放在 `README.md`，不要在当前技能主流程里重复展开。
+
+## 唯一规则
+
+- 唯一环境入口：先进入 skill 根目录，再执行 `bash ./scripts/setup_env.sh`
+- 唯一环境来源：`~/.uds_env`
+- 唯一 CAN 后端：SocketCAN（`can0` / `can1`），不要使用 `PCAN_*`
+- 唯一正确包名：`python-can`，不要执行 `pip install can`
+- 环境修复默认只允许重跑 `setup_env.sh`；除非用户明确要求，否则不要手工执行 `pip uninstall/install`
+- 默认工作目录：`$HOME/.uds_workspace`
+
+## 高频错误快查
+
+| 现象 | 处理 |
+|------|------|
+| `Invalid CAN Bus Type - None` | 先修 Python 环境，不要先查硬件；先进入 skill 根目录，再执行 `bash ./scripts/setup_env.sh` |
+| `No module named 'can'` / `can.interfaces.socketcan` | 先进入 skill 根目录，再执行 `bash ./scripts/setup_env.sh` |
+| pip 只能装出 `can-0.0.0` 或 `python-can 1.5.x` | 不要循环重装；这是包源/镜像问题。停止重试，把当前 pip 源异常报告给用户 |
+| 装成 `can-0.0.0` | 先重跑 `bash ./scripts/setup_env.sh`；如果脚本仍然报告 `can-0.0.0` 或 `python-can 1.5.x`，停止重试并报告包源异常 |
+| `No such interface: can0` / `Network is down` | 执行 `bash "$UDS_SKILL_DIR/scripts/can_init.sh"` |
+| `Permission denied` | 用 `sudo` 执行 `can_init.sh` |
+| `zipfile.BadZipFile` | 调查表文件损坏或加密，要求用户提供无密码文件 |
+| `./scripts/setup_env.sh` 不存在 / `SKILL.md` 缺失 | 技能目录不完整。不要手工补目录或补文件，重新获取完整的 `uds-diagnostic-test` 目录 |
+
+## 会话初始化
+
+每次开始任务前，只做这一段：
 
 ```bash
-# 1. 确认 CAN 硬件已连接
-lsusb | grep -i "peak\|can\|vector\|kvaser" || echo "未检测到CAN设备"
-
-# 2. 安装 Python 依赖（使用 venv 或当前环境）
-pip install python-can openpyxl
-
-# 3. 验证 SocketCAN 可用
-python3 -c "import can.interfaces.socketcan; print('SocketCAN OK')"
+source ~/.uds_env 2>/dev/null || { echo "[ERROR] ~/.uds_env 不存在，请先进入 skill 根目录，再执行 bash ./scripts/setup_env.sh"; exit 1; }
+PYTHON="$UDS_PYTHON"
+SKILL_DIR="$UDS_SKILL_DIR"
+UDS_WORK="${UDS_WORK:-$HOME/.uds_workspace}"
+test -x "$PYTHON" || { echo "[ERROR] UDS_PYTHON 无效: $UDS_PYTHON"; exit 1; }
+[ -f "$SKILL_DIR/SKILL.md" ] || { echo "[ERROR] UDS_SKILL_DIR 无效: $SKILL_DIR"; exit 1; }
+mkdir -p "$UDS_WORK"
 ```
 
-**环境要求：**
-- Linux（含 WSL2），内核支持 SocketCAN + 对应驱动（peak_usb / gs_usb / mttcan 等）
-- Python 3.8+，已安装 `python-can` 和 `openpyxl`
-- CAN 硬件适配器（PEAK PCAN-USB、Kvaser、Vector 等支持 SocketCAN 的设备）
-- sudo 权限（用于 `ip link set` 配置 CAN 接口）
+## 标准流程
 
-## 会话初始化（每次 Agent 启动后执行一次）
+### 1. 环境准备
 
-Agent 收到 UDS 任务时，先设置以下变量：
+前提：当前目录必须是包含 `SKILL.md` 和 `scripts/` 的 `uds-diagnostic-test` 目录。
+
+执行命令：
 
 ```bash
-# 使用本 SKILL.md 所在目录作为脚本根目录
-SKILL_DIR="$(dirname "$0")/.." 2>/dev/null || SKILL_DIR="."
-
-# 查找已安装 can 库的 Python（优先当前激活的 venv/conda）
-PYTHON=$(which python3 2>/dev/null || which python 2>/dev/null)
-$PYTHON -c "import can, openpyxl" 2>/dev/null || {
-    echo "[WARN] 当前 Python 缺少 python-can 或 openpyxl，请先 pip install"
-}
+bash ./scripts/setup_env.sh
 ```
 
-参数说明：
-- `$SKILL_DIR` — 指向本技能根目录（SKILL.md 所在目录）
-- `$PYTHON` — 已安装 `python-can` + `openpyxl` 的 Python 解释器
-- 所有脚本使用 `$PYTHON $SKILL_DIR/scripts/xxx.py` 格式调用
-
-## 禁止事项
-
-| 错误模式 | 正确做法 |
-|----------|----------|
-| 使用系统 `python3`（未装 can 库） | 使用 `$PYTHON`（已确认 can+openpyxl 可用） |
-| `source activate` 后分步执行 | 每个 shell 调用独立，统一用 `$PYTHON script.py` |
-| 直接执行 `.py` 文件 | 始终用 `$PYTHON $SKILL_DIR/scripts/xxx.py` |
-| 手动拼 `ip link set` 命令 | 统一用 `bash $SKILL_DIR/scripts/can_init.sh` |
-| 跳过 CAN FD 参数 | 调查表有 `can_fd=true` 时必须用 `--fd` |
-
-## 触发场景
-
-1. 收到诊断调查表 → 先询问用户是否需要生成测试脚本
-2. 被要求基于资料生成测试脚本 → 直接解析并生成
-3. 被要求生成并执行测试 → 生成后立即执行
-
-## 工作流程
-
-### 阶段 1：解析诊断调查表 & 确认配置
-
-**Step 1.0 验证文件存在：**
+### 2. 解析调查表
 
 ```bash
-ls -la "<用户提供的文件路径>"
-```
+source ~/.uds_env
+PYTHON="$UDS_PYTHON"
+SKILL_DIR="$UDS_SKILL_DIR"
+UDS_WORK="${UDS_WORK:-$HOME/.uds_workspace}"
+mkdir -p "$UDS_WORK"
 
-**Step 1.1 解析调查表：**
-
-```bash
-$PYTHON $SKILL_DIR/scripts/uds_survey_parser.py \
+"$PYTHON" "$SKILL_DIR/scripts/uds_survey_parser.py" \
   --input "<调查表文件路径>" \
-  --output /tmp/uds_parsed.json
+  --output "$UDS_WORK/uds_parsed.json"
 ```
 
-支持格式：Excel (.xlsx/.xls)、CSV (.csv)、JSON (.json)、文本/表格。
+然后读取 `$UDS_WORK/uds_parsed.json`，只检查这三项：
 
-解析器自动提取：CAN ID (TX/RX)、波特率、采样点、CAN FD 标志等 → `can_config` 字段。
+- `can_config`
+- `defaults_used`
+- `missing_attributes`
 
-**Step 1.2 检查解析结果：**
+如果 `defaults_used` 非空，必须展示给用户确认。
+用表格给用户确认的内容只保留：TX/RX CAN ID、CAN FD、波特率/采样点、是否需要 $27、安全日志输出。
 
-读取 `/tmp/uds_parsed.json`，检查 `can_config`、`defaults_used`、`missing_attributes`。
-**用表格展示关键 CAN 配置给用户确认。**
-
-**Step 1.3 询问用户确认：**
-- CAN ID (TX/RX) — 调查表有则使用，否则默认 TX=0x7E0, RX=0x7E8
-- CAN FD — 如 `can_config.can_fd=true` 则确认
-- $27 SecurityAccess DLL — security level > 0 时需要
-- CAN 通信日志 — 默认生成 `.asc` 文件
-
-### 阶段 2：生成测试脚本
+### 3. 生成脚本
 
 ```bash
-$PYTHON $SKILL_DIR/scripts/uds_test_generator.py \
-  --input /tmp/uds_parsed.json \
-  --output /tmp/uds_test.py
+source ~/.uds_env
+PYTHON="$UDS_PYTHON"
+SKILL_DIR="$UDS_SKILL_DIR"
+UDS_WORK="${UDS_WORK:-$HOME/.uds_workspace}"
+
+"$PYTHON" "$SKILL_DIR/scripts/uds_test_generator.py" \
+  --input "$UDS_WORK/uds_parsed.json" \
+  --output "$UDS_WORK/uds_test.py"
+
+"$PYTHON" -m py_compile "$UDS_WORK/uds_test.py"
 ```
 
-CAN 配置（bitrate、sample_point、TX/RX ID、CAN FD）自动从 `can_config` 继承，无需手动传参。
+### 4. 初始化 CAN
 
-### 阶段 3：初始化 CAN & 执行测试
-
-**`can_init.sh` 使用说明：**
-
-| 场景 | 命令 |
-|------|------|
-| Classic CAN（默认 500k/80%） | `bash $SKILL_DIR/scripts/can_init.sh` |
-| CAN FD（默认 500k/2M/双80%） | `bash $SKILL_DIR/scripts/can_init.sh --fd` |
-| CAN FD 自定义参数 | `bash $SKILL_DIR/scripts/can_init.sh --fd --bitrate 500000 --dbitrate 2000000 --sp 0.800 --dsp 0.800` |
-| 接口被占用，强制释放 | `bash $SKILL_DIR/scripts/can_init.sh --force` |
-| 指定通道 | `bash $SKILL_DIR/scripts/can_init.sh --channel can1` |
-| 查看帮助 | `bash $SKILL_DIR/scripts/can_init.sh --help` |
-
-**CAN FD 默认参数：** 仲裁段 500kbps / 数据段 2Mbps / 采样点均为 80% (0.800)
-
-**Step 3.1 初始化 CAN：**
+Classic CAN：
 
 ```bash
-# Classic CAN
-bash $SKILL_DIR/scripts/can_init.sh
-
-# CAN FD
-bash $SKILL_DIR/scripts/can_init.sh --fd
+source ~/.uds_env
+bash "$UDS_SKILL_DIR/scripts/can_init.sh"
 ```
 
-**Step 3.2 验证连通性：**
+CAN FD：
 
 ```bash
-$PYTHON /tmp/uds_test.py --test-connection
+source ~/.uds_env
+bash "$UDS_SKILL_DIR/scripts/can_init.sh" --fd
 ```
 
-| 输出 | 含义 |
-|------|------|
-| `[OK] CAN 连接成功` + `[OK] ECU 应答` | 正常 |
-| `[OK] CAN 连接成功` + `[WARN] ECU 无应答` | 检查 ECU 上电/CAN ID |
-| `[ERROR] CAN 连接失败` | 检查 USB/驱动 |
-
-**Step 3.3 执行测试：**
+### 5. 验证连接
 
 ```bash
-$PYTHON /tmp/uds_test.py \
-  --report /tmp/uds_report.md \
-  --can-log /tmp/can_trace_$(date +%Y%m%d_%H%M%S).asc
+source ~/.uds_env
+PYTHON="$UDS_PYTHON"
+UDS_WORK="${UDS_WORK:-$HOME/.uds_workspace}"
+
+"$PYTHON" -c "import can, importlib.metadata as md; print('python-can', md.version('python-can'), '@', can.__file__)"
+"$PYTHON" "$UDS_WORK/uds_test.py" --test-connection
 ```
 
----
+### 6. 执行测试
 
-## CAN 初始化逻辑说明
+```bash
+source ~/.uds_env
+PYTHON="$UDS_PYTHON"
+UDS_WORK="${UDS_WORK:-$HOME/.uds_workspace}"
 
-CAN 初始化有唯一入口 `can_init.sh`（bash）和内置入口 `_setup_socketcan()`（Python 模板，嵌入生成的测试脚本），两者逻辑一致：
-
+"$PYTHON" "$UDS_WORK/uds_test.py" \
+  --report "$UDS_WORK/uds_report.md" \
+  --can-log "$UDS_WORK/can_trace_$(date +%Y%m%d_%H%M%S).asc"
 ```
-加载内核模块 (can, can_raw) → 检查接口 → 强制 down（失败则 fuser -k 释放）→ 配置 → up
+
+## 何时使用 pipeline
+
+只有在用户明确要求“直接生成并执行，不需要中间确认”时，才使用：
+
+```bash
+source ~/.uds_env
+PYTHON="$UDS_PYTHON"
+SKILL_DIR="$UDS_SKILL_DIR"
+UDS_WORK="${UDS_WORK:-$HOME/.uds_workspace}"
+
+"$PYTHON" "$SKILL_DIR/scripts/uds_pcan_runner.py" pipeline \
+  --input "<调查表文件路径>" \
+  --output-dir "$UDS_WORK/pipeline_output"
 ```
 
-- 参数已匹配 → 直接使用；不匹配 → 自动 down → 重新配置 → up
-- 被占用 → `--force` 或自动 `fuser -k` 释放后重试
+默认不要直接走 pipeline。默认流程始终是：解析 → 用户确认 → 生成 → 验证 → 执行。
 
-## CAN 故障排查
+## 详细资料
 
-1. USB：`lsusb | grep -i peak`
-2. 内核模块：`lsmod | grep -E "peak_usb|can_raw"`
-3. 接口：`ip link show can0`
-4. 强制初始化：`bash $SKILL_DIR/scripts/can_init.sh --force`
-5. 手动恢复：
-   ```bash
-   sudo modprobe can can_raw peak_usb
-   sudo fuser -k /sys/class/net/can0/
-   sudo ip link set can0 down
-   sudo ip link set can0 type can bitrate 500000 sample-point 0.800
-   sudo ip link set can0 up
-   ```
+以下内容不要继续堆在当前技能主流程里，统一去 `README.md`：
 
----
-
-## 测试用例覆盖策略
-
-**DID（$22/$2E）：** 会话验证 / 安全访问验证 / 长度验证 / 边界值 / 超范围 / 功能寻址
-
-**IOControl（$2F）：** 正确执行 / 错误会话 / 无安全访问 / ReturnControlToECU
-
-**Routine（$31）：** Start/Stop/RequestResults / 会话验证 / 安全访问验证
-
-**DTC（$19/$14/$85）：** ReadDTCInformation / ClearDiagnosticInformation / ControlDTCSetting
-
-**通用：** DiagnosticSessionControl ($10) / SecurityAccess ($27) / TesterPresent ($3E) / ECUReset ($11)
-
----
-
-## UDS NRC 速查
-
-| NRC | 名称 | 场景 |
-|-----|------|------|
-| 0x13 | incorrectMessageLengthOrInvalidFormat | 错误长度请求 |
-| 0x22 | conditionsNotCorrect | 条件不满足 |
-| 0x31 | requestOutOfRange | 无效 DID/参数值 |
-| 0x33 | securityAccessDenied | 未解锁写入/控制 |
-| 0x35 | invalidKey | 安全访问密钥错误 |
-| 0x7F | serviceNotSupportedInActiveSession | 服务会话限制 |
-| 0x78 | responsePending | 需等待继续接收 |
-
-## 诊断调查表属性参考
-
-### DID 默认值（缺失时）
-
-| 属性 | 默认值 | 属性 | 默认值 |
-|------|--------|------|--------|
-| R/W State | "R" | Data Type | "RAW" |
-| Size (Bytes) | 1 | Method Type | "identical" |
-| Session Support | Default=Y, Extended=Y | Functional Addressing | "N" |
-
-### IOControl / Routine / DTC 默认值
-
-| 类型 | 属性 | 默认值 |
-|------|------|--------|
-| IOControl | IOControlParam | "ShortTermAdjustment" |
-| IOControl | Security Level | "Level1" |
-| Routine | ControlType | "StartRoutine(01)" |
-| Routine | Security Level | "Level1" |
-| DTC | Priority | 4 |
-| DTC | DTC Aging | 40 |
+- WSL2 USB 透传
+- 原生 Linux 驱动安装
+- SecurityAccess Linux 替代方案
+- NRC 0x78 / P2 / P2* 说明
+- 调查表属性默认值表
+- 深度 CAN 故障排查
+- Agent 在确认阶段如发现 DLL 路径以 `.dll` 结尾且运行在 Linux，**必须主动告知用户此限制**

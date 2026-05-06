@@ -32,12 +32,50 @@ UDS诊断自动化测试脚本
 import argparse
 import can
 import ctypes
+import importlib.metadata as md
 import json
 import os
 import struct
 import sys
 import time
 from datetime import datetime
+
+
+def validate_runtime_environment():
+    try:
+        version = md.version("python-can")
+    except Exception as exc:
+        print("[ERROR] python-can distribution not found:", exc)
+        print("[ERROR] Enter the uds-diagnostic-test skill root, then run: bash ./scripts/setup_env.sh")
+        sys.exit(2)
+
+    module_path = getattr(can, "__file__", "<unknown>")
+    try:
+        version_tuple = tuple(int(part) for part in version.split(".")[:2])
+    except Exception:
+        version_tuple = (0, 0)
+
+    if "site-packages/can-0.0.0" in module_path or version_tuple < (4, 0):
+        print("[ERROR] Unsupported python-can runtime:", version)
+        print("[ERROR] Python executable:", sys.executable)
+        print("[ERROR] can module:", module_path)
+        print("[ERROR] Expected python-can>=4.0 with can.interfaces.socketcan support")
+        print("[ERROR] Enter the uds-diagnostic-test skill root, then run: bash ./scripts/setup_env.sh")
+        if version_tuple <= (1, 5):
+            print("[ERROR] python-can 1.5.x usually means a package-source or mirror problem, not a code compatibility problem")
+        sys.exit(2)
+
+    try:
+        import can.interfaces.socketcan  # noqa: F401
+    except Exception as exc:
+        print("[ERROR] SocketCAN backend unavailable:", exc)
+        print("[ERROR] Python executable:", sys.executable)
+        print("[ERROR] can module:", module_path)
+        print("[ERROR] Enter the uds-diagnostic-test skill root, then run: bash ./scripts/setup_env.sh")
+        sys.exit(2)
+
+
+validate_runtime_environment()
 
 # ============================================================================
 # Vector SeedKey DLL 接口 (GenerateKeyEx / GenerateKeyExOpt)
