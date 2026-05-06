@@ -6,6 +6,7 @@ WORK_DIR="${UDS_WORK_DIR:-$HOME/.uds_workspace}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV_DIR="${UDS_VENV_DIR:-$HOME/.venvs/uds_diag}"
+PIP_INDEX_URL="${PIP_INDEX_URL:-}"
 
 log() {
   printf '[setup_env] %s\n' "$*"
@@ -164,19 +165,40 @@ ensure_venv_support() {
   fi
 }
 
+install_failed_msg() {
+  local venv_dir="$1"
+  log "[ERROR] pip install failed — check network / pip source"
+  log "[ERROR] Removing incomplete venv: $venv_dir"
+  rm -rf "$venv_dir"
+  exit 1
+}
+
 create_venv() {
   local host_python="$1"
   ensure_venv_support "$host_python"
+
+  if [ -d "$VENV_DIR" ]; then
+    log "Removing broken venv: $VENV_DIR"
+    rm -rf "$VENV_DIR"
+  fi
+
   mkdir -p "$(dirname "$VENV_DIR")"
-  log "No reusable Python environment found; creating $VENV_DIR"
-  "$host_python" -m venv "$VENV_DIR"
+  log "Creating Python environment: $VENV_DIR"
+  "$host_python" -m venv "$VENV_DIR" || {
+    log "[ERROR] venv creation failed; install python3-venv and retry"
+    exit 1
+  }
   "$VENV_DIR/bin/python" -m pip uninstall -y can python-can >/dev/null 2>&1 || true
+
+  local pip_flags=""
+  [ -n "$PIP_INDEX_URL" ] && pip_flags="-i $PIP_INDEX_URL"
+
   if [ -f "$SKILL_DIR/requirements.txt" ]; then
-    "$VENV_DIR/bin/python" -m pip install -U pip setuptools wheel
-    "$VENV_DIR/bin/python" -m pip install --no-cache-dir -r "$SKILL_DIR/requirements.txt"
+    "$VENV_DIR/bin/python" -m pip install $pip_flags -U pip setuptools wheel || install_failed_msg "$VENV_DIR"
+    "$VENV_DIR/bin/python" -m pip install $pip_flags --no-cache-dir -r "$SKILL_DIR/requirements.txt" || install_failed_msg "$VENV_DIR"
   else
-    "$VENV_DIR/bin/python" -m pip install -U pip setuptools wheel
-    "$VENV_DIR/bin/python" -m pip install --no-cache-dir python-can openpyxl
+    "$VENV_DIR/bin/python" -m pip install $pip_flags -U pip setuptools wheel || install_failed_msg "$VENV_DIR"
+    "$VENV_DIR/bin/python" -m pip install $pip_flags --no-cache-dir python-can openpyxl || install_failed_msg "$VENV_DIR"
   fi
   printf '%s\n' "$VENV_DIR/bin/python"
 }
@@ -189,15 +211,33 @@ UDS_PYTHON="$python_path"
 UDS_SKILL_DIR="$SKILL_DIR"
 UDS_WORK="$WORK_DIR"
 EOF
+  [ -n "$PIP_INDEX_URL" ] && echo "PIP_INDEX_URL=\"$PIP_INDEX_URL\"" >> "$ENV_FILE"
   log "Wrote $ENV_FILE"
   log "UDS_PYTHON=$python_path"
   log "UDS_SKILL_DIR=$SKILL_DIR"
   log "UDS_WORK=$WORK_DIR"
+  [ -n "$PIP_INDEX_URL" ] && log "PIP_INDEX_URL=$PIP_INDEX_URL"
+}
+
+check_env_file_complete() {
+  if [ -f "$ENV_FILE" ]; then
+    local missing_vars=""
+    for v in UDS_PYTHON UDS_SKILL_DIR UDS_WORK; do
+      if ! grep -q "^${v}=" "$ENV_FILE" 2>/dev/null; then
+        missing_vars="$missing_vars $v"
+      fi
+    done
+    if [ -n "$missing_vars" ]; then
+      log "[WARN] $ENV_FILE incomplete (missing:$missing_vars), will regenerate"
+    fi
+  fi
 }
 
 main() {
   local host_python
   local picked_python
+
+  check_env_file_complete
 
   validate_skill_layout
 
