@@ -42,6 +42,7 @@ from datetime import datetime
 
 
 def validate_runtime_environment():
+    import can
     try:
         version = md.version("python-can")
     except Exception as exc:
@@ -55,7 +56,7 @@ def validate_runtime_environment():
     except Exception:
         version_tuple = (0, 0)
 
-    if "site-packages/can-0.0.0" in module_path or version_tuple < (4, 0):
+    if "can-0.0.0" in module_path or version_tuple < (4, 0):
         print("[ERROR] Unsupported python-can runtime:", version)
         print("[ERROR] Python executable:", sys.executable)
         print("[ERROR] can module:", module_path)
