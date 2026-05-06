@@ -438,12 +438,16 @@ class IsoTpTransport:
         return can.Message(arbitration_id=self.tx_id, data=data,
                            is_extended_id=self.is_extended_id,
                            is_fd=self.is_fd,
-                           bitrate_switch=self.is_fd)
+                           bitrate_switch=self.is_fd,
+                           timestamp=time.time())
 
     def _make_msg_classic(self, data):
         """构造Classic CAN帧"""
         return can.Message(arbitration_id=self.tx_id, data=data,
-                           is_extended_id=self.is_extended_id)
+                           is_extended_id=self.is_extended_id,
+                           is_fd=self.is_fd,
+                           bitrate_switch=self.is_fd,
+                           timestamp=time.time())
 
     def _prepend_ae(self, frame):
         """混合寻址: 在帧前插入Address Extension字节"""
@@ -918,6 +922,11 @@ class TestRunner:
             if self.can_log_path:
                 try:
                     self.can_logger = can.Logger(self.can_log_path)
+                    # 写入ASC列参考注释
+                    self.can_logger.file.write("// ASC Column Reference (python-can ASCWriter)\\n")
+                    self.can_logger.file.write("// Classic CAN:  Timestamp  Ch  ID  Tx/Rx  d DLC  Data[hex]\\n")
+                    self.can_logger.file.write("// CAN FD:       CANFD  Ch  Tx/Rx  ID  BRS ESI DLC DataLen  Data[hex]  MsgDur  MsgLen  Flags  CRC  ...\\n")
+                    self.can_logger.file.write("//\\n")
                     _original_send = self.bus.send
                     _original_recv = self.bus.recv
                     _logger = self.can_logger
@@ -5608,19 +5617,30 @@ def generate_test_script(parsed_data, output_path, **kwargs):
     tx_id = kwargs.get("tx_id")
     rx_id = kwargs.get("rx_id")
     func_id = kwargs.get("func_id")
+    confirmed = kwargs.get("confirmed", False)
 
     # 仅在CLI显式指定时覆盖调查表；否则优先使用调查表，再回退到硬编码默认值
     can_config = parsed_data.get("can_config", {})
-    if tx_id is None:
-        tx_id = can_config.get("tx_id", "0x7E0")
-    if rx_id is None:
-        rx_id = can_config.get("rx_id", "0x7E8")
-    if func_id is None:
-        func_id = can_config.get("func_id", "0x7DF")
-    if bitrate is None:
-        bitrate = can_config.get("bitrate", 500000)
-    if sample_point is None:
-        sample_point = can_config.get("sample_point", 0.8)
+
+    # 追踪哪些关键参数来自硬编码默认值
+    _critical_defaults = []
+    _HARDCODED = {"tx_id": "0x7E0", "rx_id": "0x7E8", "func_id": "0x7DF",
+                   "bitrate": 500000, "sample_point": 0.8,
+                   "can_fd": False, "fd_data_bitrate": 2000000, "fd_dsample_point": 0.8}
+
+    def _track(key, cli_val, survey_val):
+        from_cli = cli_val is not None
+        from_survey = key in can_config
+        used_hardcoded = not from_cli and not from_survey
+        if used_hardcoded and key in _HARDCODED:
+            _critical_defaults.append((key, _HARDCODED[key]))
+        return survey_val if not from_cli else cli_val
+
+    tx_id = _track("tx_id", tx_id, can_config.get("tx_id", "0x7E0"))
+    rx_id = _track("rx_id", rx_id, can_config.get("rx_id", "0x7E8"))
+    func_id = _track("func_id", func_id, can_config.get("func_id", "0x7DF"))
+    bitrate = _track("bitrate", bitrate, can_config.get("bitrate", 500000))
+    sample_point = _track("sample_point", sample_point, can_config.get("sample_point", 0.8))
 
     # 统一转为int, 保证类型安全 (模板注入和python-can都需要int)
     def _to_can_id(v, fallback=0x7E0):
@@ -5648,16 +5668,34 @@ def generate_test_script(parsed_data, output_path, **kwargs):
     fd_dsample_point = kwargs.get("fd_dsample_point")
     fd_max_dlc = kwargs.get("fd_max_dlc", 64)
 
-    # CAN FD配置也从调查表合并
-    if can_config:
-        if not can_fd and can_config.get("can_fd") is True:
-            can_fd = True
-    if fd_data_bitrate is None:
-        fd_data_bitrate = can_config.get("fd_data_bitrate", 2000000)
-    if fd_dsample_point is None:
-        fd_dsample_point = can_config.get("fd_dsample_point", 0.8)
+    # CAN FD: CLI 显式传入则为 True/None，否则回退到调查表/默认值
+    can_fd_cli = kwargs.get("can_fd_cli")  # None=CLI未指定, True=--can-fd
+    can_fd = _track("can_fd", can_fd_cli, can_config.get("can_fd", False))
+    fd_data_bitrate = _track("fd_data_bitrate", fd_data_bitrate, can_config.get("fd_data_bitrate", 2000000))
+    fd_dsample_point = _track("fd_dsample_point", fd_dsample_point, can_config.get("fd_dsample_point", 0.8))
     if can_fd:
         print(f"[INFO] CAN FD配置: dbitrate={fd_data_bitrate}, dsample_point={fd_dsample_point}")
+
+    # 检查关键参数是否使用了硬编码默认值
+    _BLOCKING_KEYS = {"tx_id", "rx_id", "bitrate"}
+    _blocking_defaults = [(k, v) for k, v in _critical_defaults if k in _BLOCKING_KEYS]
+    _non_blocking = [(k, v) for k, v in _critical_defaults if k not in _BLOCKING_KEYS]
+
+    if _critical_defaults:
+        print(f"\n[WARNING] 以下关键参数在调查表和CLI中均未指定，已使用硬编码默认值：")
+        print(f"  {'参数':<20} {'默认值':<15} {'是否阻断生成':<12}")
+        print(f"  {'-'*20} {'-'*15} {'-'*12}")
+        for key, val in _blocking_defaults:
+            print(f"  {key:<20} {str(val):<15} {'是':<12}")
+        for key, val in _non_blocking:
+            print(f"  {key:<20} {str(val):<15} {'否（仅警告）':<12}")
+        print()
+
+        if _blocking_defaults and not confirmed:
+            print("[ERROR] 关键CAN参数使用了硬编码默认值，拒绝生成测试脚本。")
+            print("[ERROR] 请在调查表中补充缺失信息，或使用 --confirmed 标志确认使用默认值。")
+            sys.exit(1)
+
     seedkey_dll_path = kwargs.get("seedkey_dll_path", "")
     seedkey_variant = kwargs.get("seedkey_variant", "")
     seedkey_options = kwargs.get("seedkey_options", "")
@@ -5903,6 +5941,8 @@ def main():
                         choices=["normal_11bit", "normal_29bit", "mixed_11bit", "mixed_29bit", "normal_fixed"],
                         help="CAN ID寻址模式")
     parser.add_argument("--addr-ext", type=lambda x: int(x, 0), default=0x00, help="混合寻址Address Extension字节")
+    parser.add_argument("--confirmed", action="store_true", default=False,
+                        help="确认使用硬编码默认值（调查表缺失的CAN参数不再需要手动确认阻断）")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -5925,6 +5965,7 @@ def main():
         p2_star_timeout=args.p2_star_timeout,
         s3_timeout=args.s3_timeout,
         sa_delay=args.sa_delay,
+        can_fd_cli=(True if '--can-fd' in sys.argv else None),
         can_fd=args.can_fd,
         fd_data_bitrate=args.fd_data_bitrate,
         fd_dsample_point=args.fd_dsample_point,
@@ -5934,6 +5975,7 @@ def main():
         seedkey_options=args.sa_options,
         can_addr_mode=args.addr_mode,
         can_addr_ext=args.addr_ext,
+        confirmed=args.confirmed,
     )
 
 
