@@ -562,16 +562,16 @@ class IsoTpTransport:
                 if (msg.data[ae] & 0xF0) == 0x30:
                     fs = msg.data[ae] & 0x0F
                     if fs == 0:  # ContinueToSend
-                        return list(msg.data[ae:])
+                        return bytes(msg.data[ae:])
                     elif fs == 1:  # Wait
                         wait_count += 1
                         if wait_count >= max_wait_count:
                             return None  # 超过最大Wait次数
                         continue  # 继续等待下一个FC
                     elif fs == 2:  # Overflow
-                        return list(msg.data[ae:])  # 返回让调用者处理
+                        return bytes(msg.data[ae:])  # 返回让调用者处理
                     else:
-                        return list(msg.data[ae:])
+                        return bytes(msg.data[ae:])
         return None
 
     def _receive(self, timeout):
@@ -596,10 +596,10 @@ class IsoTpTransport:
                 if sf_dl == 0 and len(d) > ae + 1:
                     # CAN FD escape: SF_DL in byte after PCI
                     length = d[ae + 1]
-                    return list(d[ae + 2:ae + 2 + length])
+                    return bytes(d[ae + 2:ae + 2 + length])
                 else:
                     length = sf_dl
-                    return list(d[ae + 1:ae + 1 + length])
+                    return bytes(d[ae + 1:ae + 1 + length])
             elif pci == 0x10:
                 # First Frame
                 ff_dl_hi = d[ae] & 0x0F
@@ -607,9 +607,9 @@ class IsoTpTransport:
                 length = (ff_dl_hi << 8) | ff_dl_lo
                 if length == 0 and len(d) >= ae + 6:
                     length = (d[ae+2] << 24) | (d[ae+3] << 16) | (d[ae+4] << 8) | d[ae+5]
-                    data = list(d[ae + 6:])
+                    data = bytearray(d[ae + 6:])
                 else:
-                    data = list(d[ae + 2:])
+                    data = bytearray(d[ae + 2:])
 
                 # Send Flow Control
                 fc = [0x30, 0x00, 0x0A]  # ContinueToSend, BS=0, STmin=10ms
@@ -632,12 +632,12 @@ class IsoTpTransport:
                             actual_seq = cf_msg.data[ae] & 0x0F
                             if actual_seq != expected_seq:
                                 break  # SN mismatch → abort reception
-                            data.extend(list(cf_msg.data[ae + 1:]))
+                            data.extend(cf_msg.data[ae + 1:])
                             expected_seq = (expected_seq + 1) & 0x0F
                     else:
                         break  # N_Cr timeout → abort
 
-                return data[:length]
+                return bytes(data[:length])
 
         return None
 
@@ -649,7 +649,7 @@ class IsoTpTransport:
         \"\"\"直接接收原始CAN帧，返回(arb_id, data)\"\"\"
         msg = self.bus.recv(timeout=timeout_ms / 1000.0)
         if msg and msg.arbitration_id == self.rx_id:
-            return (msg.arbitration_id, list(msg.data))
+            return (msg.arbitration_id, bytes(msg.data))
         return None
 
     def send_sf_with_custom_padding(self, data, padding=0xCC):
