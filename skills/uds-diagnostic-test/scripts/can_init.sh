@@ -2,19 +2,17 @@
 # CAN 接口初始化脚本 — 支持 Linux SocketCAN (原生/WSL2)
 # 唯一入口，所有 CAN 初始化统一经过此处
 # 用法:
-#   Classic CAN:  bash can_init.sh
-#                  bash can_init.sh --bitrate 500000 --sp 0.800
-#   CAN FD:       bash can_init.sh --fd
-#                  bash can_init.sh --fd --bitrate 500000 --dbitrate 2000000 --sp 0.800 --dsp 0.800
+#   默认 (CAN FD): bash can_init.sh
+#                  bash can_init.sh --bitrate 500000 --dbitrate 2000000
+#   Classic CAN:  bash can_init.sh --classic
 #   强制释放占用: bash can_init.sh --force
-#   自动检测设备: bash can_init.sh --detect
 # 默认值:
-#   Classic CAN: bitrate=500000, sp=0.800
-#   CAN FD:      bitrate=500000(仲裁段), dbitrate=2000000(数据段), sp=0.800(仲裁段采样点), dsp=0.800(数据段采样点)
+#   默认 CAN FD:  bitrate=500000(仲裁段), dbitrate=2000000(数据段), sp=0.800(仲裁段采样点), dsp=0.800(数据段采样点)
+#   指定 --classic: bitrate=500000, sp=0.800
 # 支持驱动: peak_usb, gs_usb, mttcan, kvaser_usb, ems_usb, esd_usb2, vcan
 
 CHANNEL="can0"
-FD_MODE=false
+FD_MODE=true
 BITRATE=500000
 DBITRATE=2000000
 SAMPLE_POINT=0.800
@@ -23,6 +21,7 @@ FORCE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --classic) FD_MODE=false; shift ;;
         --fd|-f) FD_MODE=true; shift ;;
         --channel|-c) CHANNEL="$2"; shift 2 ;;
         --bitrate|-b) BITRATE="$2"; shift 2 ;;
@@ -33,13 +32,13 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo "用法: can_init.sh [选项]"
             echo ""
-            echo "=== Classic CAN ==="
+            echo "=== 默认 (CAN FD, 向下兼容 Classic CAN) ==="
             echo "  bash can_init.sh"
-            echo "  bash can_init.sh --bitrate 500000 --sp 0.800"
+            echo "  bash can_init.sh --bitrate 500000 --dbitrate 2000000"
             echo ""
-            echo "=== CAN FD (仲裁段500k, 数据段2M, 采样点均80%) ==="
-            echo "  bash can_init.sh --fd"
-            echo "  bash can_init.sh --fd --bitrate 500000 --dbitrate 2000000 --sp 0.800 --dsp 0.800"
+            echo "=== Classic CAN (仅旧硬件) ==="
+            echo "  bash can_init.sh --classic"
+            echo "  bash can_init.sh --classic --bitrate 500000 --sp 0.800"
             echo ""
             echo "=== 其他 ==="
             echo "  bash can_init.sh --channel can1               # 指定通道"
@@ -48,9 +47,9 @@ while [[ $# -gt 0 ]]; do
             echo "支持驱动: peak_usb | gs_usb | mttcan | kvaser_usb | ems_usb | esd_usb2"
             echo ""
             echo "默认值:"
-            echo "  Classic CAN: bitrate=500000, sp=0.800"
-            echo "  CAN FD:      bitrate=500000(仲裁段), dbitrate=2000000(数据段)"
+            echo "  默认 CAN FD:  bitrate=500000(仲裁段), dbitrate=2000000(数据段)"
             echo "               sp=0.800(仲裁段采样点), dsp=0.800(数据段采样点)"
+            echo "  --classic:    bitrate=500000, sp=0.800"
             exit 0
             ;;
         *)

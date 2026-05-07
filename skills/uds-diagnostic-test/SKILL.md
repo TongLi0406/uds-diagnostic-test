@@ -127,21 +127,14 @@ UDS_WORK="${UDS_WORK:-$HOME/.uds_workspace}"
 
 ### 4. 初始化 CAN
 
-`can_init.py` 是统一入口（内部转发到 `can_init.sh`），与其他步骤一致使用 `$PYTHON` 执行：
-
-Classic CAN：
+默认 CAN FD 模式（向下兼容 Classic CAN，无需区分）：
 
 ```bash
 source ~/.uds_env
 "$PYTHON" "$UDS_SKILL_DIR/scripts/can_init.py"
 ```
 
-CAN FD：
-
-```bash
-source ~/.uds_env
-"$PYTHON" "$UDS_SKILL_DIR/scripts/can_init.py" --fd
-```
+如 ECU 明确只支持 Classic CAN，加 `--classic` 参数。
 
 ### 5. 验证连接
 
